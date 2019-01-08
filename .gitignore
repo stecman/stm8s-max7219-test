@@ -1,0 +1,11 @@
+*.asm
+*.cdb
+*.ihx
+*.lk
+*.lst
+*.map
+*.rel
+*.rst
+*.sym
+*.mem
+/.sconsign.dblite
