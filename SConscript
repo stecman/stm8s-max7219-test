@@ -1,4 +1,5 @@
 import os
+import datetime
 
 # Device definition for the stm8s.h header
 # This enables available features of the device library.
@@ -18,11 +19,16 @@ EXTERNAL_RAM_SIZE_BYTES = 0
 # Compiled hex file target
 HEX_FILE = 'main.ihx'
 
+compileTime = datetime.datetime.now();
+
 env = Environment(
     CC = 'sdcc',
 
     CPPDEFINES = {
         STM8_DEVICE_DEFINE: None,
+        'COMPILE_HOUR': compileTime.hour,
+        'COMPILE_MINUTE': compileTime.minute,
+        'COMPILE_SECOND': compileTime.second,
     },
 
     CFLAGS = [

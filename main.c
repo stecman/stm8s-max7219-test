@@ -11,7 +11,6 @@ inline void spi_send_blocking(uint8_t data)
     SPI->DR = data;
 
     // Wait for TX buffer empty flag
-    // while ((SPI->SR & SPI_SR_TXE) == 0);
     while (SPI_GetFlagStatus(SPI_FLAG_TXE) != SET);
 }
 
@@ -24,7 +23,6 @@ static void max7219_cmd(uint8_t address, uint8_t data)
     spi_send_blocking(data);
 
     // Wait for busy flag to clear
-    // while ((SPI->SR & SPI_SR_BSY) != 0);
     while (SPI_GetFlagStatus(SPI_FLAG_BSY) != RESET);
 
     // Disable chip select
@@ -40,11 +38,72 @@ static void max7219_write_digits(uint8_t* data, uint8_t digits)
     }
 }
 
+inline void configureTickTimer()
+{
+    // Number of ticks per second with 16Mhz/1024 (+/- calibration)
+    const uint16_t target = 15625 + 10;
+
+    // Prescale to fit 1 second inside a 16-bit counter at 16MHz
+    TIM2->PSCR = TIM2_PRESCALER_1024;
+
+    // Load refresh delay into timer
+    TIM2->ARRH = (target >> 8);
+    TIM2->ARRL = (target & 0xFF);
+
+    // Enable timer
+    TIM2->EGR |= TIM2_EVENTSOURCE_UPDATE;
+    TIM2->CR1 |= TIM2_CR1_CEN;
+}
+
+void loadNumber(uint8_t input, uint8_t* output)
+{
+    output[0] = input / 10;
+    output[1] = input % 10;
+}
+
+struct WallTime {
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+};
+
+static struct WallTime currentTime = {COMPILE_HOUR, COMPILE_MINUTE, COMPILE_SECOND};
+
+static const uint8_t brightnessTable[] = {
+    0x05, // 12 am
+    0x05, // 1am
+    0x05, // 2am
+    0x05, // 3am
+    0x06, // 4am
+    0x07, // 5am
+    0x08, // 6am
+    0x09, // 7am
+    0x0B, // 8am
+    0x0D, // 9am
+    0x0E, // 10am
+    0x0E, // 11am
+    0x0F, // 12pm
+    0x0F, // 1pm
+    0x0F, // 2pm
+    0x0E, // 3pm
+    0x0E, // 4pm
+    0x0E, // 5pm
+    0x0D, // 6pm
+    0x0C, // 7pm
+    0x0B, // 8pm
+    0x09, // 9pm
+    0x08, // 10pm
+    0x06, // 11pm
+};
+
 int main(void)
 {
     // Configure the clock for maximum speed on the 16MHz HSI oscillator
     // At startup the clock output is divided by 8
     CLK->CKDIVR = 0x0;
+
+    // Clock calibrated to within a few milliseconds of 1s with the configured timer
+    CLK->HSITRIMR = 0b111;
 
     SPI_Init( SPI_FIRSTBIT_MSB,
               SPI_BAUDRATEPRESCALER_32,
@@ -63,7 +122,7 @@ int main(void)
     GPIOC->ODR |= (1<<4);
 
     // Wait for power to stablise
-    _delay_ms(10);
+    _delay_ms(1);
 
     GPIOC->ODR &= ~(1<<4);
 
@@ -71,7 +130,7 @@ int main(void)
     max7219_cmd(0x09, 0x00);
 
     // Set brightness
-    max7219_cmd(0x0A, 0x0F);
+    max7219_cmd(0x0A, 0x0A);
 
     // Set scan mode to 6 digits
     max7219_cmd(0x0B, 0x06);
@@ -82,97 +141,51 @@ int main(void)
     // Disable test mode
     max7219_cmd(0x0F, 0);
 
+    // Enable binary decode mode
+    max7219_cmd(0x09, 0xFF);
+
+    configureTickTimer();
+
+
+    // Tick outputon D5
+    GPIOD->DDR |= (1<<5);
+    GPIOD->CR1 |= (1<<5);
+    GPIOD->CR2 |= (1<<5);
+    GPIOD->ODR |= (1<<5);
+
     while (1) {
-        uint32_t ticks = 0;
 
-        // Enable binary decode mode
-        max7219_cmd(0x09, 0xFF);
+        // If tick timer has overflowed, increment time
+        if (TIM2->SR1 & TIM2_SR1_UIF) {
+            TIM2->SR1 &= ~TIM2_SR1_UIF;
 
-        // max7219_write_digits(digits, 6);
+            GPIOD->ODR ^= (1<<5);
 
-        // _delay_ms(1000);
+            ++currentTime.second;
 
-
-        while (1) {
-            uint32_t ticksCopy = ticks;
-
-            digits[0] = 0;
-            digits[1] = 0;
-            digits[2] = 0;
-            digits[3] = 0;
-            digits[4] = 0;
-            digits[5] = 0;
-
-            while (ticksCopy >= 100000) {
-                digits[0]++;
-                ticksCopy -= 100000;
+            if (currentTime.second == 60) {
+                currentTime.second = 0;
+                ++currentTime.minute;
             }
 
-            while (ticksCopy >= 10000) {
-                digits[1]++;
-                ticksCopy -= 10000;
+            if (currentTime.minute == 60) {
+                currentTime.minute = 0;
+                ++currentTime.hour;
             }
 
-            while (ticksCopy >= 1000) {
-                digits[2]++;
-                ticksCopy -= 1000;
+            // Roll over at 24 hours
+            if (currentTime.hour == 24) {
+                currentTime.hour = 0;
             }
 
-            while (ticksCopy >= 100) {
-                digits[3]++;
-                ticksCopy -= 100;
-            }
+            loadNumber(currentTime.hour, digits);
+            loadNumber(currentTime.minute, digits + 2);
+            loadNumber(currentTime.second, digits + 4);
 
-            while (ticksCopy >= 10) {
-                digits[4]++;
-                ticksCopy -= 10;
-            }
-
-            while (ticksCopy >= 1) {
-                digits[5]++;
-                ticksCopy -= 1;
-            }
-
-            _delay_ms(100);
             max7219_write_digits(digits, 6);
 
-            ticks++;
+            // Update brightness
+            max7219_cmd(0x0A, brightnessTable[currentTime.hour]);
         }
-
-        // // Disable binary decode mode
-        // max7219_cmd(0x09, 0x00);
-
-        // digits[0] = 0x0;
-        // digits[1] = 0b00111101;
-        // digits[2] = 0b00011101;
-        // digits[3] = 0b00011101;
-        // digits[4] = 0b00010101;
-        // digits[5] = 0b00010001;
-
-        // // Write value for all digits
-        // max7219_write_digits(digits, 6);
-
-        // for (uint8_t i = 0, on = 0; i < 7; ++i) {
-        //     on = !on;
-        //     max7219_cmd(0x0C, on);
-        //     _delay_ms(200);
-        // }
-
-        // _delay_ms(500);
-
-        // // Toggle test mode
-        // for (uint8_t u = 0; u < 2; ++u) {
-        //     uint8_t byte = 0xC0;
-
-        //     while ( byte > 1) {
-
-        //         for (uint8_t i = 0; i < 6; ++i) {
-        //             max7219_cmd(i + 1, byte & ~0x1);
-        //         }
-
-        //         byte >>= 1;
-        //         _delay_ms(80);
-        //     }
-        // }
     }
 }
